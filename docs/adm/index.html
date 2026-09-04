@@ -1607,16 +1607,29 @@ const ICON_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const ICON_DOLLAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
 const ICON_WARN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 
+function itensFinalizadosNoPeriodo(dias){
+  const hoje = todayISO();
+  return historicoEtapas.filter(h => h.para==='finalizado' && daysBetween(h.data, hoje)>=0 && daysBetween(h.data, hoje)<dias).length;
+}
 function renderStats(){
   const abertos = pedidosAtivos().filter(p=>p.itens.some(it=>it.status!=='finalizado'));
   const totalReceber = pedidosAtivos().reduce((s,p)=> s + Math.max((Number(p.valorTotal)||0)-(Number(p.valorPago)||0),0),0);
   const {entradas: recebidoMes} = entradasSaidasMesPedidos();
   const atrasados = pedidosAtivos().filter(p=>p.itens.some(it=>itemAtrasado(it,p))).length;
 
+  // Sem o módulo financeiro correspondente, troca o card de valor em R$ por um
+  // indicador de produtividade — Master sempre vê os cards financeiros originais.
+  const cardRecebido = temModulo('financeiro_contas')
+    ? {label:'Recebido no mês', value: fmtMoney(recebidoMes), sub:'', icon:ICON_TREND, alerta:false}
+    : {label:'Itens finalizados hoje', value: itensFinalizadosNoPeriodo(1), sub:'', icon:ICON_TREND, alerta:false};
+  const cardReceber = temModulo('financeiro_cobranca')
+    ? {label:'A receber', value: fmtMoney(totalReceber), sub:'Saldo de todos os pedidos', icon:ICON_DOLLAR, alerta:false}
+    : {label:'Itens finalizados esta semana', value: itensFinalizadosNoPeriodo(7), sub:'', icon:ICON_DOLLAR, alerta:false};
+
   const stats = [
-    {label:'Recebido no mês', value: fmtMoney(recebidoMes), sub:'', icon:ICON_TREND, alerta:false},
+    cardRecebido,
     {label:'Pedidos em aberto', value: abertos.length, sub: fmtMoney(abertos.reduce((s,p)=>s+(Number(p.valorTotal)||0),0))+' em produção', icon:ICON_CLOCK, alerta:false},
-    {label:'A receber', value: fmtMoney(totalReceber), sub:'Saldo de todos os pedidos', icon:ICON_DOLLAR, alerta:false},
+    cardReceber,
     {label:'Pedidos atrasados', value: atrasados, sub: atrasados>0 ? 'Verifique os prazos' : 'Tudo em dia', icon:ICON_WARN, alerta: atrasados>0}
   ];
   const el = document.getElementById('stats');
