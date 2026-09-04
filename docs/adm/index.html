@@ -633,6 +633,16 @@ function wirePwdToggles(container){
   });
 }
 
+function traduzirErroLogin(msgOriginal){
+  const m = (msgOriginal||'').toLowerCase();
+  if(!m) return 'E-mail ou senha incorretos.';
+  if(m.includes('invalid login credentials')) return 'E-mail ou senha incorretos.';
+  if(m.includes('email not confirmed')) return 'E-mail ainda não confirmado. Verifique a caixa de entrada.';
+  if(m.includes('too many requests') || m.includes('rate limit')) return 'Muitas tentativas seguidas. Aguarde um instante e tente de novo.';
+  if(m.includes('user not found')) return 'E-mail ou senha incorretos.';
+  return 'E-mail ou senha incorretos.';
+}
+
 function showLoginSupabase(errMsg, infoMsg){
   const gate = document.getElementById('authGate');
   gate.innerHTML = `
@@ -662,7 +672,7 @@ function showLoginSupabase(errMsg, infoMsg){
       });
       const data = await res.json();
       if(!res.ok || !data.access_token){
-        showLoginSupabase(data.error_description || data.msg || 'E-mail ou senha incorretos.');
+        showLoginSupabase(traduzirErroLogin(data.error_description || data.msg));
         return;
       }
       sessionToken = data.access_token;
