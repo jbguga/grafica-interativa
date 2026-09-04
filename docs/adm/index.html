@@ -106,6 +106,9 @@
   .fieldrow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .fieldrow.three{grid-template-columns:2fr 1fr 1fr;}
   .modal-actions{display:flex;justify-content:space-between;margin-top:18px;align-items:center;}
+  .mod-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:6px 14px;}
+  .mod-chk{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);cursor:pointer;}
+  .mod-chk input{width:16px;height:16px;}
   .modal-actions .right{display:flex;gap:8px;}
   .error{color:var(--coral);font-size:12px;margin-top:6px;display:none;}
   .paylog{border-top:1px dashed var(--line);margin-top:12px;padding-top:10px;}
@@ -508,14 +511,13 @@
 
     <!-- ===== PÁGINA: EQUIPE ===== -->
     <div class="page" id="page-equipe" style="display:none;">
-      <div class="page-head"><div class="page-title">Equipe</div></div>
+      <div class="page-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div class="page-title">Equipe</div>
+        <button class="btn" id="btnNovoUsuario" style="display:none;">+ Novo usuário</button>
+      </div>
       <div class="dash-card">
-        <div class="dash-card-head"><h3>Em construção</h3></div>
-        <div class="empty-panel" style="padding:20px;">
-          Em breve: cadastro de novos usuários (atendente, designer etc.) com controle de permissões por módulo —
-          cada perfil vai poder ter acesso liberado ou bloqueado a telas específicas, como saldo de contas,
-          projeções financeiras ou apenas o quadro de produção.
-        </div>
+        <div class="dash-card-head"><h3>Pessoas com acesso ao painel</h3></div>
+        <div id="listaEquipe" class="empty-panel" style="padding:20px;">Carregando...</div>
       </div>
     </div>
 
@@ -536,6 +538,32 @@ const COLS = [
 ];
 const ESFRIANDO_DIAS = 60;
 
+const MASTER_EMAIL = 'jbguga@gmail.com';
+const TODOS_MODULOS = ['painel','producao','pedidos','clientes','produtos','financeiro_cobranca','financeiro_contas','financeiro_pgv','relatorios','equipe'];
+const MODULO_LABELS = {
+  painel: 'Painel (visão geral)',
+  producao: 'Produção (kanban)',
+  pedidos: 'Pedidos',
+  clientes: 'Clientes',
+  produtos: 'Produtos (estoque)',
+  financeiro_cobranca: 'Financeiro — Régua de cobrança',
+  financeiro_contas: 'Financeiro — Contas e movimentações',
+  financeiro_pgv: 'Financeiro — PGV (indicadores)',
+  relatorios: 'Relatórios',
+  equipe: 'Equipe (gestão de usuários)'
+};
+const PAGINA_MODULOS = {
+  painel: ['painel'],
+  producao: ['producao'],
+  pedidos: ['pedidos'],
+  clientes: ['clientes'],
+  produtos: ['produtos'],
+  financeiro: ['financeiro_cobranca','financeiro_contas','financeiro_pgv'],
+  relatorios: ['relatorios'],
+  equipe: ['equipe']
+};
+const FIN_PAINEL_MODULO = { panelPGV:'financeiro_pgv', panelContas:'financeiro_contas', panelCobranca:'financeiro_cobranca' };
+
 let pedidos = [];
 let financeiro = {};
 let produtos = [];
@@ -545,6 +573,11 @@ let creditos = [];
 let clientesCadastro = [];
 let historicoEtapas = [];
 let categoriasProdutos = [];
+let currentUserEmail = '';
+let isMaster = false;
+let modulosPermitidos = null;
+let minhaPermissao = null;
+let equipeUsuarios = [];
 let draggingRef = null;
 let panelState = {bodyCobranca:true, bodyClientes:true, bodyPGV:true, bodyEstoque:true, bodyContas:true, bodyCreditos:true};
 let filtroLancamentos = 'todos';
@@ -559,6 +592,11 @@ function daysBetween(iso1, iso2){
   return Math.round((b-a)/86400000);
 }
 function fmtDate(iso){ return iso ? iso.split('-').reverse().join('/') : ''; }
+
+function decodeJWT(token){
+  try{ return JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); }
+  catch(e){ return {}; }
+}
 
 async function sha256(text){
   const enc = new TextEncoder().encode(text);
@@ -652,10 +690,91 @@ function showLoginSupabase(errMsg, infoMsg){
   });
 }
 
-function unlockApp(){
+async function unlockApp(){
   document.getElementById('authGate').style.display = 'none';
   document.getElementById('mainWrap').style.display = 'block';
+  await carregarPermissoes();
+  aplicarPermissoes();
   loadData();
+}
+
+// modulosPermitidos===null significa "ainda não logou" — nesse caso libera tudo,
+// pra não travar a montagem inicial da página antes do gate de login aparecer.
+function temModulo(m){
+  if(modulosPermitidos===null) return true;
+  return isMaster || modulosPermitidos.includes(m);
+}
+function temAlgumModulo(lista){
+  if(modulosPermitidos===null) return true;
+  return isMaster || lista.some(m => modulosPermitidos.includes(m));
+}
+function primeiraPaginaPermitida(){
+  return PAGINAS.find(p => temAlgumModulo(PAGINA_MODULOS[p]||[])) || null;
+}
+async function carregarPermissoes(){
+  // O e-mail vem direto do token — não existe rota no app pra alterar isso, só o login real muda.
+  const payload = decodeJWT(sessionToken);
+  currentUserEmail = payload.email || '';
+  isMaster = currentUserEmail === MASTER_EMAIL;
+  if(isMaster){
+    modulosPermitidos = TODOS_MODULOS.slice();
+    minhaPermissao = null;
+    carregarEquipeLista();
+    return;
+  }
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/permissoes_usuarios?email=eq.${encodeURIComponent(currentUserEmail)}&select=*`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${sessionToken}` }
+    });
+    const rows = res.ok ? await res.json() : [];
+    minhaPermissao = rows[0] || null;
+    modulosPermitidos = (minhaPermissao && minhaPermissao.modulos) || [];
+  }catch(e){
+    console.error('Falha ao carregar permissões', e);
+    minhaPermissao = null;
+    modulosPermitidos = [];
+  }
+}
+async function carregarEquipeLista(){
+  if(!isMaster) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/permissoes_usuarios?select=*&order=nome.asc`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${sessionToken}` }
+    });
+    equipeUsuarios = res.ok ? await res.json() : [];
+  }catch(e){
+    console.error('Falha ao carregar equipe', e);
+    equipeUsuarios = [];
+  }
+  renderEquipe();
+}
+function aplicarPermissoes(){
+  document.querySelectorAll('.navitem').forEach(el => {
+    el.style.display = temAlgumModulo(PAGINA_MODULOS[el.dataset.page]||[]) ? '' : 'none';
+  });
+  Object.keys(FIN_PAINEL_MODULO).forEach(painelId => {
+    const el = document.getElementById(painelId);
+    if(el) el.style.display = temModulo(FIN_PAINEL_MODULO[painelId]) ? '' : 'none';
+  });
+  const sfBadge = document.querySelector('.sf-badge');
+  if(sfBadge) sfBadge.textContent = isMaster ? 'Master' : (minhaPermissao?.papel || 'Equipe');
+  if(!temAlgumModulo(PAGINA_MODULOS[paginaAtual]||[])){
+    const alvo = primeiraPaginaPermitida();
+    if(alvo) mostrarPagina(alvo); else mostrarSemAcesso();
+  }
+}
+function mostrarSemAcesso(){
+  document.querySelectorAll('.page').forEach(el => el.style.display='none');
+  const titulo = document.getElementById('topbarTitulo');
+  if(titulo) titulo.textContent = 'Sem acesso';
+  let aviso = document.getElementById('semAcessoAviso');
+  if(!aviso){
+    aviso = document.createElement('div');
+    aviso.id = 'semAcessoAviso';
+    aviso.style.cssText = 'padding:60px 20px;text-align:center;color:var(--ink-soft);font-size:14px;';
+    document.querySelector('.main-area').appendChild(aviso);
+  }
+  aviso.innerHTML = 'Seu usuário ainda não tem nenhum módulo liberado.<br>Fale com o responsável pelo sistema.';
 }
 
 document.getElementById('btnSair').addEventListener('click', () => {
@@ -846,6 +965,7 @@ function render(){
   renderClientesLista();
   renderCadastroClientes();
   renderRelatorios();
+  renderEquipe();
 }
 
 function pedidosAtivos(){ return pedidos.filter(p=>!p.arquivado); }
@@ -1659,6 +1779,127 @@ function renderCadastroClientes(){
   el.querySelectorAll('.lanc-row').forEach(row => {
     row.addEventListener('click', () => openClienteModal(row.dataset.id));
   });
+}
+
+function renderEquipe(){
+  const btn = document.getElementById('btnNovoUsuario');
+  const el = document.getElementById('listaEquipe');
+  if(!el) return;
+  if(isMaster){
+    if(btn){ btn.style.display = ''; btn.onclick = () => openUsuarioModal(null); }
+    const linhaMaster = `<div class="lanc-row">
+      <div><b>Gustavo</b> <span class="lmeta">${MASTER_EMAIL}</span>
+      <div class="lmeta">Master · acesso total garantido no código (não depende de cadastro nesta tabela)</div></div>
+    </div>`;
+    const linhasEquipe = equipeUsuarios.map(u => `
+      <div class="lanc-row" data-id="${u.id}" style="cursor:pointer;">
+        <div>
+          <b>${escapeHtml(u.nome)}</b> <span class="lmeta">${escapeHtml(u.email)}</span>
+          <div class="lmeta">${escapeHtml(u.papel||'Sem papel definido')} · ${(u.modulos||[]).length} módulo(s) liberado(s)</div>
+        </div>
+      </div>`).join('');
+    el.innerHTML = linhaMaster + (linhasEquipe || '<div class="empty-panel">Nenhum outro usuário cadastrado ainda.</div>');
+    el.querySelectorAll('.lanc-row[data-id]').forEach(row => {
+      row.addEventListener('click', () => openUsuarioModal(row.dataset.id));
+    });
+  } else {
+    if(btn) btn.style.display = 'none';
+    if(!minhaPermissao){
+      el.innerHTML = '<div class="empty-panel">Você ainda não tem um cadastro de permissões. Fale com o Master.</div>';
+      return;
+    }
+    const mods = (minhaPermissao.modulos||[]).map(m => MODULO_LABELS[m]||m).join(', ') || 'nenhum';
+    el.innerHTML = `<div class="lanc-row">
+      <div><b>${escapeHtml(minhaPermissao.nome||'')}</b> <span class="lmeta">${escapeHtml(minhaPermissao.email||currentUserEmail)}</span>
+      <div class="lmeta">Papel: ${escapeHtml(minhaPermissao.papel||'—')}</div>
+      <div class="lmeta">Módulos liberados: ${escapeHtml(mods)}</div></div>
+    </div>`;
+  }
+}
+
+function openUsuarioModal(id){
+  const u = id ? equipeUsuarios.find(x=>x.id===id) : null;
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <button type="button" class="modal-close" onclick="this.closest('.overlay').remove()">✕</button>
+      <h2>${u ? 'Editar usuário' : 'Novo usuário'}</h2>
+      <div class="field"><label>Nome</label><input id="eq-nome" type="text" value="${u?escapeHtml(u.nome||''):''}"></div>
+      <div class="field"><label>E-mail de login</label><input id="eq-email" type="email" value="${u?escapeHtml(u.email||''):''}">
+        <div class="lmeta" style="margin-top:4px;">Precisa ser exatamente o e-mail que essa pessoa usa (ou vai usar) pra logar no painel. O login em si (senha) é criado por você direto no Supabase — aqui você só libera o que essa pessoa pode ver.</div>
+      </div>
+      <div class="field"><label>Papel</label><input id="eq-papel" type="text" placeholder="Ex: Atendente, Designer" value="${u?escapeHtml(u.papel||''):''}"></div>
+      <div class="field"><label>Módulos liberados</label>
+        <div class="mod-grid">
+          ${TODOS_MODULOS.map(m => `<label class="mod-chk"><input type="checkbox" value="${m}" ${u&&(u.modulos||[]).includes(m)?'checked':''}> ${MODULO_LABELS[m]}</label>`).join('')}
+        </div>
+      </div>
+      <div class="error" id="eq-error">Preencha nome e e-mail.</div>
+      <div class="modal-actions">
+        <div>${u ? '<button class="btn secondary" id="eq-excluir">Excluir</button>' : ''}</div>
+        <div class="right">
+          <button class="btn secondary" id="eq-cancelar">Cancelar</button>
+          <button class="btn" id="eq-salvar">Salvar</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#eq-cancelar').addEventListener('click', () => overlay.remove());
+
+  overlay.querySelector('#eq-salvar').addEventListener('click', async () => {
+    const nome = overlay.querySelector('#eq-nome').value.trim();
+    const email = overlay.querySelector('#eq-email').value.trim().toLowerCase();
+    const papel = overlay.querySelector('#eq-papel').value.trim();
+    const modulos = Array.from(overlay.querySelectorAll('.mod-chk input:checked')).map(c=>c.value);
+    if(!nome || !email){ overlay.querySelector('#eq-error').style.display='block'; return; }
+    if(email === MASTER_EMAIL){ alert('Esse e-mail já é o Master e tem acesso total automaticamente — não precisa (nem pode) ser cadastrado aqui.'); return; }
+    const btn = overlay.querySelector('#eq-salvar');
+    btn.disabled = true; btn.textContent = 'Salvando...';
+    try{
+      if(u){
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/permissoes_usuarios?id=eq.${u.id}`, {
+          method: 'PATCH',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${sessionToken}`, 'Content-Type':'application/json', 'Prefer':'return=minimal' },
+          body: JSON.stringify({ nome, email, papel, modulos })
+        });
+        if(!res.ok) throw new Error('Falha ao salvar: '+res.status);
+      } else {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/permissoes_usuarios`, {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${sessionToken}`, 'Content-Type':'application/json', 'Prefer':'return=minimal' },
+          body: JSON.stringify({ nome, email, papel, modulos })
+        });
+        if(!res.ok) throw new Error('Falha ao salvar: '+res.status);
+      }
+      overlay.remove();
+      await carregarEquipeLista();
+    }catch(e){
+      console.error(e);
+      alert('Não foi possível salvar. Verifique se esse e-mail já não está cadastrado, e tente de novo.');
+      btn.disabled=false; btn.textContent='Salvar';
+    }
+  });
+
+  const btnExcluir = overlay.querySelector('#eq-excluir');
+  if(btnExcluir){
+    btnExcluir.addEventListener('click', async () => {
+      if(!confirm(`Remover o acesso de ${u.nome}? A pessoa continua podendo logar (se já tiver senha), mas fica sem nenhum módulo liberado até você cadastrar de novo.`)) return;
+      try{
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/permissoes_usuarios?id=eq.${u.id}`, {
+          method:'DELETE',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${sessionToken}` }
+        });
+        if(!res.ok) throw new Error('Falha ao excluir: '+res.status);
+        overlay.remove();
+        await carregarEquipeLista();
+      }catch(e){
+        console.error(e);
+        alert('Não foi possível excluir agora. Tente de novo.');
+      }
+    });
+  }
 }
 
 const ESTADOS_BR = ['AC','AL','AM','AP','BA','CE','DF','ES','GO','MA','MG','MS','MT','PA','PB','PE','PI','PR','RJ','RN','RO','RR','RS','SC','SE','SP','TO'];
@@ -2498,6 +2739,9 @@ function openModal(id){
   const p = id ? pedidos.find(x=>x.id===id) : null;
   let itensDraft = p ? p.itens.map(it=>({...it})) : [{id:uid(), descricao:'', quantidade:1, status:'orcamento', prazo:'', produtoId:null}];
   let pagamentosDraft = p ? (p.pagamentos||[]).map(pg=>({...pg})) : [];
+  // Entrada travada: só pode ser editada de novo por quem logou com o e-mail Master.
+  const entradaTravada = !!(p && Number(p.entradaValor) > 0 && !isMaster);
+  const entradaContaOpts = `<option value="">— sem conta vinculada —</option>` + contas.map(c=>`<option value="${c.id}" ${(p&&p.entradaContaId===c.id)?'selected':''}>${escapeHtml(c.nome)}</option>`).join('');
 
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -2896,6 +3140,7 @@ const PAGINAS = ['painel','producao','pedidos','clientes','produtos','financeiro
 let paginaAtual = 'painel';
 function mostrarPagina(nome){
   if(!PAGINAS.includes(nome)) return;
+  if(!temAlgumModulo(PAGINA_MODULOS[nome]||[])) return;
   paginaAtual = nome;
   PAGINAS.forEach(p => {
     const el = document.getElementById('page-'+p);
