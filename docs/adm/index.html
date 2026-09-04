@@ -2770,6 +2770,13 @@ function openModal(id){
       <div id="f-excedenteAction" style="display:none;margin:-8px 0 12px;"></div>
       <div class="error" id="f-error">Preencha o cliente e pelo menos um item com valor.</div>
 
+      <h4>Entrada (R$)</h4>
+      <div class="fieldrow">
+        <div class="field"><label>Valor da entrada</label><input id="f-entradaValor" type="number" step="0.01" min="0" value="${p&&p.entradaValor?p.entradaValor:''}" ${entradaTravada?'disabled':''}></div>
+        <div class="field"><label>Conta de recebimento</label><select id="f-entradaConta" ${entradaTravada?'disabled':''}>${entradaContaOpts}</select></div>
+      </div>
+      <div class="lmeta" style="margin:-8px 0 12px;">${entradaTravada ? '🔒 Entrada travada — já foi salva com valor. Só o Master pode alterar.' : 'Valor recebido no ato do pedido, separado dos pagamentos parcelados abaixo. Depois de salvo com valor, só o Master pode alterar.'}</div>
+
       <h4>Pagamentos recebidos <span id="pg-total" style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink-soft);"></span></h4>
       <div id="creditoDisponivel" style="display:none;"></div>
       <div id="pagamentosContainer"></div>
@@ -2921,7 +2928,8 @@ function openModal(id){
     const subtotal = itensDraft.reduce((s,it)=> s + (Number(it.quantidade)||0)*(Number(it.valorUnitario)||0), 0);
     const desconto = parseFloat(overlay.querySelector('#f-desconto').value)||0;
     const total = Math.max(0, subtotal - desconto);
-    const totalPago = pagamentosDraft.reduce((s,pg)=>s+(Number(pg.valor)||0),0);
+    const entradaAtual = parseFloat(overlay.querySelector('#f-entradaValor').value)||0;
+    const totalPago = pagamentosDraft.reduce((s,pg)=>s+(Number(pg.valor)||0),0) + entradaAtual;
     const saldo = Math.round((total - totalPago)*100)/100;
     overlay.querySelector('#f-subtotal').textContent = 'Subtotal dos itens: ' + fmtMoney(subtotal) + (desconto>0 ? ' · desconto: -'+fmtMoney(desconto) : '');
     overlay.querySelector('#f-valorTotalDisplay').textContent = fmtMoney(total);
@@ -2958,6 +2966,7 @@ function openModal(id){
   }
   atualizarResumoValores();
   overlay.querySelector('#f-desconto').addEventListener('input', atualizarResumoValores);
+  overlay.querySelector('#f-entradaValor').addEventListener('input', atualizarResumoValores);
 
   overlay.querySelector('#btnAddItem').addEventListener('click', () => {
     itensDraft.push({id:uid(), descricao:'', quantidade:1, status:'orcamento', prazo:'', produtoId:null, valorUnitario:0});
@@ -2992,15 +3001,24 @@ function openModal(id){
     const subtotal = itensValidos.reduce((s,it)=> s + (Number(it.quantidade)||0)*(Number(it.valorUnitario)||0), 0);
     const desconto = parseFloat(overlay.querySelector('#f-desconto').value)||0;
 
+    // Se a entrada já estava travada e quem está salvando não é o Master, ignora
+    // qualquer valor que tenha chegado do formulário e mantém o que já estava salvo —
+    // não confia só no atributo disabled do input (que é só uma trava de interface).
+    const entradaTravadaAgora = !!(p && Number(p.entradaValor) > 0 && !isMaster);
+    const entradaValorFinal = entradaTravadaAgora ? (Number(p.entradaValor)||0) : (parseFloat(overlay.querySelector('#f-entradaValor').value)||0);
+    const entradaContaFinal = entradaTravadaAgora ? (p.entradaContaId||null) : (overlay.querySelector('#f-entradaConta').value || null);
+
     const data = {
       cliente,
       telefone: overlay.querySelector('#f-telefone').value.trim(),
       prazo: overlay.querySelector('#f-prazo').value,
       desconto,
       valorTotal: Math.max(0, Math.round((subtotal - desconto)*100)/100),
-      valorPago: pagamentosValidos.reduce((s,pg)=>s+(Number(pg.valor)||0),0),
+      valorPago: pagamentosValidos.reduce((s,pg)=>s+(Number(pg.valor)||0),0) + entradaValorFinal,
       pagamentos: pagamentosValidos,
-      itens: itensValidos
+      itens: itensValidos,
+      entradaValor: entradaValorFinal,
+      entradaContaId: entradaContaFinal
     };
 
     const itensAntigos = p ? p.itens : [];
@@ -3022,6 +3040,7 @@ function openModal(id){
 
     sincronizarPagamentos(pedidoIdRef, osRef, cliente, p ? (p.pagamentos||[]) : [], data.pagamentos);
     sincronizarCreditos(cliente, overlay.querySelector('#f-telefone').value.trim(), osRef, p ? (p.pagamentos||[]) : [], data.pagamentos);
+    sincronizarEntrada(pedidoIdRef, osRef, cliente, p, data);
 
     if(p){
       Object.assign(p, data);
@@ -3070,6 +3089,37 @@ function sincronizarPagamentos(pedidoId, osRef, cliente, pagamentosAntigos, paga
       pg.lancamentoId = lancId;
     }
   });
+}
+
+function sincronizarEntrada(pedidoId, osRef, cliente, pedidoAntigo, data){
+  const lancIdAntigo = pedidoAntigo ? pedidoAntigo.entradaLancamentoId : null;
+  const valorNovo = Number(data.entradaValor)||0;
+
+  if(valorNovo <= 0){
+    if(lancIdAntigo) lancamentos = lancamentos.filter(l => l.id !== lancIdAntigo);
+    data.entradaLancamentoId = null;
+    return;
+  }
+  if(!lancIdAntigo){
+    if(data.entradaContaId){
+      const lancId = 'lc_'+uid();
+      lancamentos.push({id:lancId, tipo:'entrada', contaId:data.entradaContaId, categoria:'Entrada do pedido', descricao:'Entrada — Pedido '+osRef+' — '+cliente, valor:valorNovo, status:'pago', data:todayISO(), vencimento:'', pedidoId});
+      data.entradaLancamentoId = lancId;
+    } else {
+      data.entradaLancamentoId = null;
+    }
+    return;
+  }
+  const l = lancamentos.find(x=>x.id===lancIdAntigo);
+  if(l && data.entradaContaId){
+    l.contaId = data.entradaContaId; l.valor = valorNovo;
+    data.entradaLancamentoId = lancIdAntigo;
+  } else if(l && !data.entradaContaId){
+    lancamentos = lancamentos.filter(x=>x.id!==lancIdAntigo);
+    data.entradaLancamentoId = null;
+  } else {
+    data.entradaLancamentoId = lancIdAntigo;
+  }
 }
 
 function sincronizarCreditos(cliente, telefone, osRef, pagamentosAntigos, pagamentosNovos){
