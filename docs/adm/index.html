@@ -777,10 +777,23 @@ function mostrarSemAcesso(){
   aviso.innerHTML = 'Seu usuário ainda não tem nenhum módulo liberado.<br>Fale com o responsável pelo sistema.';
 }
 
+function showLogoutScreen(){
+  const gate = document.getElementById('authGate');
+  gate.style.display = '';
+  gate.innerHTML = `
+    <div class="authbox">
+      ${LOGO_AUTH}
+      <h2>Você saiu do sistema com segurança</h2>
+      <p class="sub">Sua sessão foi encerrada.</p>
+      <button class="btn" id="btnVoltarLogin" style="width:100%;margin-top:6px;">Voltar para o login</button>
+    </div>`;
+  gate.querySelector('#btnVoltarLogin').addEventListener('click', () => showLoginSupabase());
+}
+
 document.getElementById('btnSair').addEventListener('click', () => {
   sessionToken = null;
   document.getElementById('mainWrap').style.display = 'none';
-  initAuth();
+  showLogoutScreen();
 });
 document.getElementById('btnTrocarSenha').addEventListener('click', async () => {
   const gate = document.getElementById('authGate');
