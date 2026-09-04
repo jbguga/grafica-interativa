@@ -11,14 +11,19 @@ Este arquivo é o ponto de partida para qualquer sessão do Claude Code neste pr
 
 ## Estrutura do projeto
 
+Repositório Git em `github.com/jbguga/grafica-interativa` (público), publicado via GitHub Pages a partir da pasta `docs/`:
+
 ```
-site-package/
-├── index.html          → site institucional (público)
-├── loja/index.html      → loja virtual (placeholder, ainda não construída de verdade)
-└── adm/index.html       → painel de gestão completo (o "coração" do sistema)
+CLAUDE.md              → notas internas (não fica na pasta publicada, de propósito)
+LICENSE                → licença proprietária
+docs/                   → tudo que é publicado pelo GitHub Pages
+├── CNAME                → domínio customizado (graficainterativa.com.br, ver notas de arquitetura)
+├── index.html            → site institucional (público)
+├── loja/index.html       → loja virtual (placeholder, ainda não construída de verdade)
+└── adm/index.html        → painel de gestão completo (o "coração" do sistema)
 ```
 
-Os três se linkam entre si por caminhos relativos (`loja/index.html`, `adm/index.html`, `../index.html`), prontos pra funcionar assim que forem hospedados juntos num domínio real, mantendo essa mesma estrutura de pastas.
+Os três HTML se linkam entre si por caminhos relativos (`loja/index.html`, `adm/index.html`, `../index.html`) — continuam funcionando porque os três se moveram juntos pra dentro de `docs/`.
 
 **`adm/index.html` é um app single-file**: todo HTML, CSS e JS estão num único arquivo (~2.900 linhas). Não há build step, bundler, nem dependências de npm. É intencional — o projeto inteiro foi construído assim, arquivo por arquivo, para rodar em qualquer navegador sem servidor de aplicação.
 
@@ -84,5 +89,5 @@ Os três se linkam entre si por caminhos relativos (`loja/index.html`, `adm/inde
 - **Sem framework, sem bundler.** Se for reestruturar em múltiplos arquivos/componentes, isso é uma decisão nova a discutir com o usuário — ele é iniciante em programação (parou "há muito tempo" em páginas simples), então prefira manter simplicidade sobre sofisticação técnica, e explique mudanças de arquitetura em termos práticos.
 - **`salvarTudo()`** salva o payload inteiro de uma vez (PATCH na linha única da tabela) — não é por-registro. Funciona bem no volume atual (uma gráfica pequena/média); se crescer muito, pode precisar normalizar em tabelas separadas no futuro.
 - Datas armazenadas como string `YYYY-MM-DD` (não `Date` objects) em todo o código, por simplicidade de serialização/comparação.
-- O usuário tem 2 domínios: um em uso (sistema antigo, permanece até este ser validado) e um livre (será usado pra testar este sistema publicado). Quando aprovado, ele cancela o antigo e troca o DNS do domínio principal.
+- O usuário tem 2 domínios: `interativa.art.br` (em uso, aponta hoje para o sistema antigo de terceiros — só migra quando este sistema for validado e for pra valer) e `graficainterativa.com.br` (domínio reserva, mais curto, usado como CNAME do GitHub Pages para testar este sistema publicado enquanto isso). Quando aprovado, ele pretende trocar o DNS do `interativa.art.br` pra apontar pra cá também — ainda não decidiu se vai manter os dois domínios ativos ou cancelar o antigo.
 - Todo o desenvolvimento até aqui foi feito por chat com o Claude (claude.ai), editando o arquivo com `str_replace`/reescritas pontuais. Esta é a primeira vez que o projeto entra num ambiente com sistema de arquivos real e Git — vale considerar inicializar um repositório Git logo no início da sessão, se ainda não existir.
