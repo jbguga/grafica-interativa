@@ -2977,6 +2977,9 @@ function openModal(id){
   // Entrada travada: só pode ser editada de novo por quem logou com o e-mail Master.
   const entradaTravada = !!(p && Number(p.entradaValor) > 0 && !isMaster);
   const entradaContaOpts = `<option value="">— sem conta vinculada —</option>` + contas.map(c=>`<option value="${c.id}" ${(p&&p.entradaContaId===c.id)?'selected':''}>${escapeHtml(c.nome)}</option>`).join('');
+  const entradaForma = (p && p.entradaFormaPagamento) || 'dinheiro';
+  const entradaEhCartao = entradaForma==='debito' || entradaForma==='credito';
+  const entradaEhBoleto = entradaForma==='boleto';
 
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -3010,6 +3013,19 @@ function openModal(id){
         <div class="field"><label>Valor da entrada</label><input id="f-entradaValor" type="number" step="0.01" min="0" value="${p&&p.entradaValor?p.entradaValor:''}" ${entradaTravada?'disabled':''}></div>
         <div class="field"><label>Conta de recebimento</label><select id="f-entradaConta" ${entradaTravada?'disabled':''}>${entradaContaOpts}</select></div>
       </div>
+      <div class="fieldrow">
+        <div class="field"><label>Forma de pagamento</label>
+          <select id="f-entradaForma" ${entradaTravada?'disabled':''}>
+            <option value="dinheiro" ${entradaForma==='dinheiro'?'selected':''}>Dinheiro</option>
+            <option value="pix" ${entradaForma==='pix'?'selected':''}>Pix</option>
+            <option value="debito" ${entradaForma==='debito'?'selected':''}>Cartão de Débito</option>
+            <option value="credito" ${entradaForma==='credito'?'selected':''}>Cartão de Crédito</option>
+            <option value="boleto" ${entradaForma==='boleto'?'selected':''}>Boleto</option>
+          </select>
+        </div>
+        <div class="field" id="f-entradaValorRecebidoField" style="${entradaEhCartao?'':'display:none;'}"><label>Valor recebido (R$)</label><input id="f-entradaValorRecebido" type="number" step="0.01" min="0" placeholder="Pode preencher depois" value="${p&&p.entradaValorRecebido!=null?p.entradaValorRecebido:''}" ${entradaTravada?'disabled':''}></div>
+      </div>
+      <div class="field" id="f-entradaVencimentoField" style="${entradaEhBoleto?'':'display:none;'}"><label>Data de vencimento</label><input id="f-entradaVencimento" type="date" value="${p&&p.entradaVencimento?p.entradaVencimento:''}" ${entradaTravada?'disabled':''}></div>
       <div class="lmeta" style="margin:-8px 0 12px;">${entradaTravada ? '🔒 Após registrado, não é possível alterar o valor da entrada.' : 'Valor recebido no ato do pedido, separado dos pagamentos parcelados abaixo. Depois de salvo com valor, só o Master pode alterar.'}</div>
 
       <h4>Pagamentos recebidos <span id="pg-total" style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink-soft);"></span></h4>
@@ -3223,6 +3239,12 @@ function openModal(id){
   atualizarResumoValores();
   overlay.querySelector('#f-desconto').addEventListener('input', atualizarResumoValores);
   overlay.querySelector('#f-entradaValor').addEventListener('input', atualizarResumoValores);
+  function atualizarCamposEntrada(){
+    const forma = overlay.querySelector('#f-entradaForma').value;
+    overlay.querySelector('#f-entradaValorRecebidoField').style.display = (forma==='debito'||forma==='credito') ? '' : 'none';
+    overlay.querySelector('#f-entradaVencimentoField').style.display = forma==='boleto' ? '' : 'none';
+  }
+  overlay.querySelector('#f-entradaForma').addEventListener('change', atualizarCamposEntrada);
 
   overlay.querySelector('#btnAddItem').addEventListener('click', () => {
     itensDraft.push({id:uid(), descricao:'', quantidade:1, status:'orcamento', prazo:'', produtoId:null, valorUnitario:0});
@@ -3258,6 +3280,12 @@ function openModal(id){
       errBox.style.display = 'block';
       return;
     }
+    const entradaJaTravada = !!(p && Number(p.entradaValor) > 0 && !isMaster);
+    if(!entradaJaTravada && overlay.querySelector('#f-entradaForma').value==='boleto' && Number(overlay.querySelector('#f-entradaValor').value)>0 && !overlay.querySelector('#f-entradaVencimento').value){
+      errBox.textContent = 'Entrada por boleto precisa de uma data de vencimento.';
+      errBox.style.display = 'block';
+      return;
+    }
     errBox.style.display = 'none';
 
     const subtotal = itensValidos.reduce((s,it)=> s + (Number(it.quantidade)||0)*(Number(it.valorUnitario)||0), 0);
@@ -3266,9 +3294,15 @@ function openModal(id){
     // Se a entrada já estava travada e quem está salvando não é o Master, ignora
     // qualquer valor que tenha chegado do formulário e mantém o que já estava salvo —
     // não confia só no atributo disabled do input (que é só uma trava de interface).
-    const entradaTravadaAgora = !!(p && Number(p.entradaValor) > 0 && !isMaster);
+    const entradaTravadaAgora = entradaJaTravada;
     const entradaValorFinal = entradaTravadaAgora ? (Number(p.entradaValor)||0) : (parseFloat(overlay.querySelector('#f-entradaValor').value)||0);
     const entradaContaFinal = entradaTravadaAgora ? (p.entradaContaId||null) : (overlay.querySelector('#f-entradaConta').value || null);
+    const entradaFormaFinal = entradaTravadaAgora ? (p.entradaFormaPagamento||'dinheiro') : overlay.querySelector('#f-entradaForma').value;
+    const entradaValorRecebidoRaw = overlay.querySelector('#f-entradaValorRecebido').value;
+    const entradaValorRecebidoFinal = entradaTravadaAgora
+      ? (p.entradaValorRecebido==null ? null : Number(p.entradaValorRecebido))
+      : ((entradaFormaFinal==='debito'||entradaFormaFinal==='credito') ? (entradaValorRecebidoRaw===''?null:parseFloat(entradaValorRecebidoRaw)||0) : null);
+    const entradaVencimentoFinal = entradaTravadaAgora ? (p.entradaVencimento||'') : overlay.querySelector('#f-entradaVencimento').value;
 
     const data = {
       cliente,
@@ -3280,6 +3314,9 @@ function openModal(id){
       pagamentos: pagamentosValidos,
       itens: itensValidos,
       entradaValor: entradaValorFinal,
+      entradaFormaPagamento: entradaFormaFinal,
+      entradaValorRecebido: entradaValorRecebidoFinal,
+      entradaVencimento: entradaVencimentoFinal,
       entradaContaId: entradaContaFinal
     };
 
@@ -3348,7 +3385,7 @@ function sincronizarPagamentos(pedidoId, osRef, cliente, pagamentosAntigos, paga
       }
     } else if(pg.contaId && (pg.valor !== antigo.valor || pg.data !== antigo.data || pg.contaId !== antigo.contaId)){
       const lancId = 'lc_'+uid();
-      lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, formaPagamento:pg.formaPagamento||'dinheiro', valorRecebido:pg.valorRecebido==null?null:Number(pg.valorRecebido), status:'pago', data:pg.data||todayISO(), vencimento:pg.vencimento||'', pedidoId});
+      lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, formaPagamento:pg.formaPagamento||'dinheiro', valorRecebido:pg.valorRecebido==null?null:Number(pg.valorRecebido), status:statusInicialLancamento('pago', pg.formaPagamento||'dinheiro', currentUserEmail), criadoPor:currentUserEmail, data:pg.data||todayISO(), vencimento:pg.vencimento||'', pedidoId});
       pg.lancamentoId = lancId;
     }
   });
@@ -3363,10 +3400,11 @@ function sincronizarEntrada(pedidoId, osRef, cliente, pedidoAntigo, data){
     data.entradaLancamentoId = null;
     return;
   }
+  const forma = data.entradaFormaPagamento || 'dinheiro';
   if(!lancIdAntigo){
     if(data.entradaContaId){
       const lancId = 'lc_'+uid();
-      lancamentos.push({id:lancId, tipo:'entrada', contaId:data.entradaContaId, categoria:'Entrada do pedido', descricao:'Entrada — Pedido '+osRef+' — '+cliente, valor:valorNovo, status:'pago', data:todayISO(), vencimento:'', pedidoId});
+      lancamentos.push({id:lancId, tipo:'entrada', contaId:data.entradaContaId, categoria:'Entrada do pedido', descricao:'Entrada — Pedido '+osRef+' — '+cliente, valor:valorNovo, formaPagamento:forma, valorRecebido:data.entradaValorRecebido==null?null:Number(data.entradaValorRecebido), status:statusInicialLancamento('pago', forma, currentUserEmail), criadoPor:currentUserEmail, data:todayISO(), vencimento:data.entradaVencimento||'', pedidoId});
       data.entradaLancamentoId = lancId;
     } else {
       data.entradaLancamentoId = null;
@@ -3376,6 +3414,7 @@ function sincronizarEntrada(pedidoId, osRef, cliente, pedidoAntigo, data){
   const l = lancamentos.find(x=>x.id===lancIdAntigo);
   if(l && data.entradaContaId){
     l.contaId = data.entradaContaId; l.valor = valorNovo;
+    l.formaPagamento = forma; l.valorRecebido = data.entradaValorRecebido==null?null:Number(data.entradaValorRecebido); l.vencimento = data.entradaVencimento||'';
     data.entradaLancamentoId = lancIdAntigo;
   } else if(l && !data.entradaContaId){
     lancamentos = lancamentos.filter(x=>x.id!==lancIdAntigo);
