@@ -344,6 +344,10 @@
       </div>
       <button class="btn" id="btnNovo" style="margin-bottom:18px;">+ Novo pedido</button>
       <div class="dcards" id="stats"></div>
+      <div class="dash-card" id="cardBoletosReceber" style="display:none;">
+        <div class="dash-card-head"><h3>Boletos a receber</h3></div>
+        <div id="boletosReceber"></div>
+      </div>
       <div class="dash-card">
         <div class="dash-card-head"><h3>Últimos pedidos</h3><a href="#" id="verTodosPedidos">Ver todos ↗</a></div>
         <div id="ultimosPedidos"></div>
@@ -437,6 +441,14 @@
     <!-- ===== PÁGINA: FINANCEIRO ===== -->
     <div class="page" id="page-financeiro" style="display:none;">
       <div class="page-head"><div class="page-title">Financeiro</div></div>
+
+      <div class="panel" id="panelConferencia">
+        <div class="panel-head" data-target="bodyConferencia">
+          <h3>Conferência financeira <span class="hint" id="hintConferencia"></span></h3>
+          <span id="toggleConferencia">−</span>
+        </div>
+        <div class="panel-body" id="bodyConferencia"></div>
+      </div>
 
       <div class="panel" id="panelPGV">
         <div class="panel-head" data-target="bodyPGV">
@@ -546,7 +558,7 @@ const COLS = [
 const ESFRIANDO_DIAS = 60;
 
 const MASTER_EMAIL = 'jbguga@gmail.com';
-const TODOS_MODULOS = ['painel','producao','pedidos','clientes','produtos','financeiro_cobranca','financeiro_contas','financeiro_pgv','relatorios','equipe'];
+const TODOS_MODULOS = ['painel','producao','pedidos','clientes','produtos','financeiro_cobranca','financeiro_contas','financeiro_pgv','financeiro_movimento','relatorios','equipe'];
 const MODULO_LABELS = {
   painel: 'Painel (visão geral)',
   producao: 'Produção (kanban)',
@@ -556,6 +568,7 @@ const MODULO_LABELS = {
   financeiro_cobranca: 'Financeiro — Régua de cobrança',
   financeiro_contas: 'Financeiro — Contas e movimentações',
   financeiro_pgv: 'Financeiro — PGV (indicadores)',
+  financeiro_movimento: 'Financeiro — Lançar pagamentos (sem ver saldo nem confirmar)',
   relatorios: 'Relatórios',
   equipe: 'Equipe (gestão de usuários)'
 };
@@ -565,11 +578,12 @@ const PAGINA_MODULOS = {
   pedidos: ['pedidos'],
   clientes: ['clientes'],
   produtos: ['produtos'],
-  financeiro: ['financeiro_cobranca','financeiro_contas','financeiro_pgv'],
+  financeiro: ['financeiro_cobranca','financeiro_contas','financeiro_pgv','financeiro_movimento'],
   relatorios: ['relatorios'],
   equipe: ['equipe']
 };
-const FIN_PAINEL_MODULO = { panelPGV:'financeiro_pgv', panelContas:'financeiro_contas', panelCobranca:'financeiro_cobranca' };
+const FIN_PAINEL_MODULO = { panelPGV:['financeiro_pgv'], panelContas:['financeiro_contas','financeiro_movimento'], panelCobranca:['financeiro_cobranca'] };
+const FORMA_PAGAMENTO_LABELS = { dinheiro:'Dinheiro', pix:'Pix', debito:'Cartão de Débito', credito:'Cartão de Crédito', boleto:'Boleto' };
 
 let pedidos = [];
 let financeiro = {};
@@ -586,7 +600,7 @@ let modulosPermitidos = null;
 let minhaPermissao = null;
 let equipeUsuarios = [];
 let draggingRef = null;
-let panelState = {bodyCobranca:true, bodyClientes:true, bodyPGV:true, bodyEstoque:true, bodyContas:true, bodyCreditos:true};
+let panelState = {bodyCobranca:true, bodyClientes:true, bodyPGV:true, bodyEstoque:true, bodyContas:true, bodyCreditos:true, bodyConferencia:true};
 let filtroLancamentos = 'todos';
 let mesAtualPGV = todayISOtoMonth();
 function todayISOtoMonth(){ return new Date().toISOString().slice(0,7); }
@@ -771,8 +785,12 @@ function aplicarPermissoes(){
   });
   Object.keys(FIN_PAINEL_MODULO).forEach(painelId => {
     const el = document.getElementById(painelId);
-    if(el) el.style.display = temModulo(FIN_PAINEL_MODULO[painelId]) ? '' : 'none';
+    if(el) el.style.display = temAlgumModulo(FIN_PAINEL_MODULO[painelId]) ? '' : 'none';
   });
+  const painelConferencia = document.getElementById('panelConferencia');
+  if(painelConferencia) painelConferencia.style.display = isMaster ? '' : 'none';
+  const cardBoletos = document.getElementById('cardBoletosReceber');
+  if(cardBoletos) cardBoletos.style.display = isMaster ? '' : 'none';
   const sfBadge = document.querySelector('.sf-badge');
   if(sfBadge) sfBadge.textContent = isMaster ? 'Master' : (minhaPermissao?.papel || 'Equipe');
   if(!temAlgumModulo(PAGINA_MODULOS[paginaAtual]||[])){
@@ -982,9 +1000,11 @@ function waLink(tel, msg){
 
 function render(){
   renderStats();
+  renderBoletosReceber();
   renderCobranca();
   renderClientesEsfriando();
   renderPGV();
+  renderConferencia();
   renderCategoriasProdutos();
   renderEstoque();
   renderContas();
@@ -1293,12 +1313,22 @@ function openProdutoModal(id){
 
 /* ===================== FINANCEIRO: CONTAS E MOVIMENTAÇÕES ===================== */
 
+// Débito/crédito descontam taxa da maquininha: uma vez confirmado, o que conta
+// pro saldo/relatórios é o valor líquido recebido, não o valor bruto da venda.
+function valorEfetivo(l){ return l.valorRecebido!=null ? Number(l.valorRecebido)||0 : Number(l.valor)||0; }
+// Lançamento nasce pendente_conferencia se quem lançou não é o Master, ou se a
+// forma de pagamento é débito/crédito/boleto — nesses casos o valor só entra no
+// saldo/relatórios depois que o Master confirmar no painel de Conferência financeira.
+function statusInicialLancamento(statusEscolhido, formaPagamento, criadoPorEmail){
+  const exigeConferencia = criadoPorEmail !== MASTER_EMAIL || ['debito','credito','boleto'].includes(formaPagamento);
+  return exigeConferencia ? 'pendente_conferencia' : statusEscolhido;
+}
 function saldoConta(contaId){
   const conta = contas.find(c=>c.id===contaId);
   if(!conta) return 0;
   const movimento = lancamentos
     .filter(l => l.contaId===contaId && l.status==='pago')
-    .reduce((s,l) => s + (l.tipo==='entrada' ? Number(l.valor)||0 : -(Number(l.valor)||0)), 0);
+    .reduce((s,l) => s + (l.tipo==='entrada' ? valorEfetivo(l) : -valorEfetivo(l)), 0);
   return (Number(conta.saldoInicial)||0) + movimento;
 }
 function totalContas(){
@@ -1313,16 +1343,101 @@ function totalAReceber(){
 function entradasSaidasMes(){
   const mes = todayISO().slice(0,7);
   const doMes = lancamentos.filter(l => l.status==='pago' && (l.data||'').slice(0,7)===mes);
-  const entradas = doMes.filter(l=>l.tipo==='entrada').reduce((s,l)=>s+(Number(l.valor)||0),0);
-  const saidas = doMes.filter(l=>l.tipo==='saida').reduce((s,l)=>s+(Number(l.valor)||0),0);
+  const entradas = doMes.filter(l=>l.tipo==='entrada').reduce((s,l)=>s+valorEfetivo(l),0);
+  const saidas = doMes.filter(l=>l.tipo==='saida').reduce((s,l)=>s+valorEfetivo(l),0);
   return {entradas, saidas};
 }
 
+function nomeDoUsuario(email){
+  if(email===MASTER_EMAIL) return 'Master';
+  const u = equipeUsuarios.find(x=>x.email===email);
+  return u ? u.nome : (email||'—');
+}
+function renderConferencia(){
+  const el = document.getElementById('bodyConferencia');
+  if(!el) return;
+  const pendentes = lancamentos.filter(l => l.status==='pendente_conferencia').sort((a,b)=>(a.data||'').localeCompare(b.data||''));
+  const hint = document.getElementById('hintConferencia');
+  if(hint) hint.textContent = pendentes.length ? '('+pendentes.length+' pendente(s))' : '';
+  if(pendentes.length===0){ el.innerHTML = '<div class="empty-panel">Nenhum lançamento aguardando conferência.</div>'; return; }
+  el.innerHTML = pendentes.map(l => {
+    const conta = contas.find(c=>c.id===l.contaId);
+    const ehCartao = l.formaPagamento==='debito' || l.formaPagamento==='credito';
+    const vencidoBoleto = l.formaPagamento==='boleto' && l.vencimento && l.vencimento < todayISO();
+    return `<div class="lanc-row" data-id="${l.id}">
+      <div>
+        <div>${escapeHtml(l.categoria||(l.tipo==='entrada'?'Entrada':'Saída'))} ${l.descricao?'— '+escapeHtml(l.descricao):''}</div>
+        <div class="lmeta">
+          Lançado por ${escapeHtml(nomeDoUsuario(l.criadoPor))} · ${FORMA_PAGAMENTO_LABELS[l.formaPagamento]||l.formaPagamento} · ${conta?escapeHtml(conta.nome):'sem conta'}
+          ${l.formaPagamento==='boleto' ? ' · vence '+fmtDate(l.vencimento)+(vencidoBoleto?' <b style="color:var(--coral);">(vencido)</b>':'') : ''}
+        </div>
+      </div>
+      <div class="lanc-actions" style="align-items:center;flex-wrap:wrap;">
+        <span class="lvalor ${l.tipo}">${l.tipo==='saida'?'-':'+'}${fmtMoney(l.valor)}</span>
+        ${ehCartao ? `<input type="number" class="conf-valorRecebido" step="0.01" min="0" placeholder="Valor recebido" value="${l.valorRecebido!=null?l.valorRecebido:''}" style="width:120px;">` : ''}
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;cursor:pointer;"><input type="checkbox" class="conf-confirmar"> Confirmar</label>
+      </div>
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('.lanc-row').forEach(row => {
+    const id = row.dataset.id;
+    row.querySelector('.conf-confirmar').addEventListener('change', e => {
+      if(!e.target.checked) return;
+      const l = lancamentos.find(x=>x.id===id);
+      if(!l) return;
+      const ehCartao = l.formaPagamento==='debito' || l.formaPagamento==='credito';
+      if(ehCartao){
+        const input = row.querySelector('.conf-valorRecebido');
+        if(input.value===''){
+          alert('Preencha o valor recebido antes de confirmar.');
+          e.target.checked = false;
+          return;
+        }
+        l.valorRecebido = parseFloat(input.value)||0;
+      } else if(l.valorRecebido==null){
+        l.valorRecebido = l.valor;
+      }
+      l.status = 'pago';
+      salvarTudo(); render();
+    });
+  });
+}
 function renderContas(){
+  const body = document.getElementById('bodyContas');
+  if(!body) return;
+
+  // Só lança, não vê saldo nem a lista geral — mostra apenas os próprios
+  // lançamentos do dia, todos aguardando o Master conferir.
+  if(!temModulo('financeiro_contas')){
+    document.getElementById('hintContas').textContent = '';
+    const meusHoje = lancamentos.filter(l => l.criadoPor===currentUserEmail && l.data===todayISO())
+      .sort((a,b)=>(b.criadoEm||b.id||'').localeCompare(a.criadoEm||a.id||''));
+    body.innerHTML = `
+      <div class="panel-add" style="gap:8px;">
+        <button class="btn small" id="btnNovoLancamento">+ Nova movimentação</button>
+      </div>
+      <div style="padding:12px 14px 0;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-soft);font-weight:600;">Meus lançamentos de hoje</div>
+      <div id="listaLancamentosProprio"></div>`;
+    document.getElementById('btnNovoLancamento').addEventListener('click', () => openLancamentoModal(null));
+    const el = document.getElementById('listaLancamentosProprio');
+    if(meusHoje.length===0){ el.innerHTML = '<div class="empty-panel">Nenhum lançamento seu hoje ainda.</div>'; return; }
+    el.innerHTML = meusHoje.map(l => {
+      const conta = contas.find(c=>c.id===l.contaId);
+      return `<div class="lanc-row">
+        <div>
+          <div>${escapeHtml(l.categoria||(l.tipo==='entrada'?'Entrada':'Saída'))} ${l.descricao?'— '+escapeHtml(l.descricao):''}</div>
+          <div class="lmeta">${FORMA_PAGAMENTO_LABELS[l.formaPagamento]||''}${conta?' · '+escapeHtml(conta.nome):''} · ${l.status==='pendente_conferencia'?'aguardando conferência do Master':'já conferido'}</div>
+        </div>
+        <span class="lvalor ${l.tipo}">${l.tipo==='saida'?'-':'+'}${fmtMoney(l.valor)}</span>
+      </div>`;
+    }).join('');
+    return;
+  }
+
   const pendentes = lancamentos.filter(l=>l.status==='pendente').length;
   document.getElementById('hintContas').textContent = pendentes ? '('+pendentes+' pendente(s))' : '';
   const {entradas, saidas} = entradasSaidasMes();
-  const body = document.getElementById('bodyContas');
 
   let html = `
     <div class="pgv-grid">
@@ -1394,7 +1509,7 @@ function renderContas(){
 function renderListaLancamentos(){
   const el = document.getElementById('listaLancamentos');
   if(!el) return;
-  let lista = lancamentos.slice();
+  let lista = lancamentos.filter(l => l.status !== 'pendente_conferencia');
   if(filtroLancamentos==='pagar') lista = lista.filter(l=>l.tipo==='saida' && l.status==='pendente');
   else if(filtroLancamentos==='receber') lista = lista.filter(l=>l.tipo==='entrada' && l.status==='pendente');
   else if(filtroLancamentos==='pagos') lista = lista.filter(l=>l.status==='pago');
@@ -1516,7 +1631,15 @@ function openLancamentoModal(id){
       <div class="field"><label>Categoria</label><input id="l-categoria" type="text" placeholder="Ex.: Fornecedor, Aluguel, Venda de balcão" value="${l?escapeHtml(l.categoria||''):''}"></div>
       <div class="field"><label>Descrição (opcional)</label><input id="l-descricao" type="text" value="${l?escapeHtml(l.descricao||''):''}"></div>
       <div class="fieldrow">
-        <div class="field"><label>Valor (R$)</label><input id="l-valor" type="number" step="0.01" min="0" value="${l?l.valor||0:''}"></div>
+        <div class="field"><label>Forma de pagamento</label>
+          <select id="l-forma">
+            <option value="dinheiro" ${!l||!l.formaPagamento||l.formaPagamento==='dinheiro'?'selected':''}>Dinheiro</option>
+            <option value="pix" ${l&&l.formaPagamento==='pix'?'selected':''}>Pix</option>
+            <option value="debito" ${l&&l.formaPagamento==='debito'?'selected':''}>Cartão de Débito</option>
+            <option value="credito" ${l&&l.formaPagamento==='credito'?'selected':''}>Cartão de Crédito</option>
+            <option value="boleto" ${l&&l.formaPagamento==='boleto'?'selected':''}>Boleto</option>
+          </select>
+        </div>
         <div class="field"><label>Status</label>
           <select id="l-status">
             <option value="pago" ${!l||l.status==='pago'?'selected':''}>Pago/recebido</option>
@@ -1524,9 +1647,13 @@ function openLancamentoModal(id){
           </select>
         </div>
       </div>
+      <div class="fieldrow" id="l-valoresRow">
+        <div class="field"><label id="l-valorLabel">Valor (R$)</label><input id="l-valor" type="number" step="0.01" min="0" value="${l?l.valor||0:''}"></div>
+        <div class="field" id="l-valorRecebidoField" style="display:none;"><label>Valor recebido (R$)</label><input id="l-valorRecebido" type="number" step="0.01" min="0" placeholder="Pode preencher depois" value="${l&&l.valorRecebido!=null?l.valorRecebido:''}"></div>
+      </div>
       <div class="fieldrow">
         <div class="field"><label>Data</label><input id="l-data" type="date" value="${l?l.data||todayISO():todayISO()}"></div>
-        <div class="field"><label>Vencimento (se pendente)</label><input id="l-vencimento" type="date" value="${l?l.vencimento||'':''}"></div>
+        <div class="field" id="l-vencimentoField"><label id="l-vencimentoLabel">Vencimento (se pendente)</label><input id="l-vencimento" type="date" value="${l?l.vencimento||'':''}"></div>
       </div>
       <div class="error" id="l-error">Preencha conta, categoria e valor.</div>
       <div class="modal-actions">
@@ -1538,6 +1665,18 @@ function openLancamentoModal(id){
       </div>
     </div>`;
   document.body.appendChild(overlay);
+
+  function atualizarCamposForma(){
+    const forma = overlay.querySelector('#l-forma').value;
+    const ehCartao = forma==='debito' || forma==='credito';
+    const ehBoleto = forma==='boleto';
+    overlay.querySelector('#l-valorLabel').textContent = ehCartao ? 'Valor da venda (R$)' : 'Valor (R$)';
+    overlay.querySelector('#l-valorRecebidoField').style.display = ehCartao ? '' : 'none';
+    overlay.querySelector('#l-vencimentoLabel').textContent = ehBoleto ? 'Data de vencimento' : 'Vencimento (se pendente)';
+  }
+  atualizarCamposForma();
+  overlay.querySelector('#l-forma').addEventListener('change', atualizarCamposForma);
+
   overlay.querySelector('#l-cancelar').addEventListener('click', () => overlay.remove());
   if(l){
     overlay.querySelector('#l-excluir').addEventListener('click', () => {
@@ -1549,21 +1688,36 @@ function openLancamentoModal(id){
     const contaId = overlay.querySelector('#l-conta').value;
     const categoria = overlay.querySelector('#l-categoria').value.trim();
     const valor = overlay.querySelector('#l-valor').value;
+    const forma = overlay.querySelector('#l-forma').value;
+    const vencimento = overlay.querySelector('#l-vencimento').value;
     const errBox = overlay.querySelector('#l-error');
-    if(!contaId || !categoria || valor===''){ errBox.style.display='block'; return; }
+    if(!contaId || !categoria || valor===''){
+      errBox.textContent = 'Preencha conta, categoria e valor.';
+      errBox.style.display='block'; return;
+    }
+    if(forma==='boleto' && !vencimento){
+      errBox.textContent = 'Boleto precisa de uma data de vencimento.';
+      errBox.style.display='block'; return;
+    }
     errBox.style.display='none';
+    const valorRecebidoRaw = overlay.querySelector('#l-valorRecebido').value;
     const data = {
       tipo: overlay.querySelector('#l-tipo').value,
       contaId,
       categoria,
       descricao: overlay.querySelector('#l-descricao').value.trim(),
       valor: parseFloat(valor)||0,
+      formaPagamento: forma,
+      valorRecebido: (forma==='debito'||forma==='credito') ? (valorRecebidoRaw===''?null:parseFloat(valorRecebidoRaw)||0) : null,
       status: overlay.querySelector('#l-status').value,
       data: overlay.querySelector('#l-data').value || todayISO(),
-      vencimento: overlay.querySelector('#l-vencimento').value
+      vencimento
     };
     if(l){ Object.assign(l, data); }
-    else { lancamentos.push({id:'lc_'+uid(), ...data}); }
+    else {
+      data.status = statusInicialLancamento(data.status, data.formaPagamento, currentUserEmail);
+      lancamentos.push({id:'lc_'+uid(), criadoPor:currentUserEmail, ...data});
+    }
     salvarTudo(); renderContas(); overlay.remove();
   });
 }
@@ -1614,6 +1768,25 @@ const ICON_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const ICON_DOLLAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
 const ICON_WARN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 
+function renderBoletosReceber(){
+  const el = document.getElementById('boletosReceber');
+  if(!el) return;
+  const hoje = todayISO();
+  const boletos = lancamentos.filter(l => l.tipo==='entrada' && l.formaPagamento==='boleto' && l.status==='pendente_conferencia')
+    .sort((a,b) => (a.vencimento||'').localeCompare(b.vencimento||''));
+  if(boletos.length===0){ el.innerHTML = '<div class="empty-panel">Nenhum boleto pendente.</div>'; return; }
+  el.innerHTML = boletos.map(l => {
+    const conta = contas.find(c=>c.id===l.contaId);
+    const vencido = l.vencimento && l.vencimento < hoje;
+    return `<div class="lanc-row">
+      <div>
+        <div>${escapeHtml(l.categoria||'Boleto')} ${l.descricao?'— '+escapeHtml(l.descricao):''}</div>
+        <div class="lmeta" style="${vencido?'color:var(--coral);font-weight:600;':''}">Vence ${fmtDate(l.vencimento)}${vencido?' — vencido':''}${conta?' · '+escapeHtml(conta.nome):''}</div>
+      </div>
+      <span class="lvalor entrada">+${fmtMoney(l.valor)}</span>
+    </div>`;
+  }).join('');
+}
 function itensFinalizadosNoPeriodo(dias){
   const hoje = todayISO();
   return historicoEtapas.filter(h => h.para==='finalizado' && daysBetween(h.data, hoje)>=0 && daysBetween(h.data, hoje)<dias).length;
@@ -1647,9 +1820,17 @@ function renderStats(){
       ${s.sub ? `<div class="dcard-sub">${s.sub}</div>` : ''}
     </div>`).join('');
 }
+// Um pagamento sem lancamentoId é crédito de cliente ou não ficou vinculado a
+// conta nenhuma — não passa por conferência. Os demais só contam se o
+// lançamento vinculado já não estiver esperando o Master confirmar.
+function pagamentoConfirmado(pg){
+  if(!pg.lancamentoId) return true;
+  const l = lancamentos.find(x=>x.id===pg.lancamentoId);
+  return !l || l.status !== 'pendente_conferencia';
+}
 function entradasSaidasMesPedidos(){
   const mes = todayISO().slice(0,7);
-  const entradas = pedidosAtivos().reduce((s,p) => s + (p.pagamentos||[]).filter(pg=>(pg.data||'').slice(0,7)===mes).reduce((s2,pg)=>s2+(Number(pg.valor)||0),0), 0);
+  const entradas = pedidosAtivos().reduce((s,p) => s + (p.pagamentos||[]).filter(pg=>(pg.data||'').slice(0,7)===mes && pagamentoConfirmado(pg)).reduce((s2,pg)=>s2+(Number(pg.valor)||0),0), 0);
   return {entradas};
 }
 function renderPainelExtra(){
@@ -1982,7 +2163,7 @@ function abrirPedidosDoCliente(nomeCliente){
   });
 }
 
-function abrirBuscaClientePedido(overlayPedido){
+function abrirBuscaClientePedido(overlayPedido, idCampoCliente='f-cliente', idCampoTelefone='f-telefone'){
   const picker = document.createElement('div');
   picker.className = 'overlay';
   picker.innerHTML = `
@@ -2011,10 +2192,11 @@ function abrirBuscaClientePedido(overlayPedido){
       row.addEventListener('click', () => {
         const c = clientesCadastro.find(x=>x.id===row.dataset.id);
         if(!c) return;
-        overlayPedido.querySelector('#f-cliente').value = c.nome;
-        overlayPedido.querySelector('#f-telefone').value = c.telefone || '+55';
-        const evt = new Event('input', {bubbles:true});
-        overlayPedido.querySelector('#f-cliente').dispatchEvent(evt);
+        const campoCliente = overlayPedido.querySelector('#'+idCampoCliente);
+        const campoTelefone = overlayPedido.querySelector('#'+idCampoTelefone);
+        campoCliente.value = c.nome;
+        if(campoTelefone) campoTelefone.value = c.telefone || '+55';
+        campoCliente.dispatchEvent(new Event('input', {bubbles:true}));
         picker.remove();
       });
     });
@@ -2293,8 +2475,8 @@ function renderRelClientes(periodo){
 }
 function renderRelFinanceiro(){
   const meses = ultimosNMeses(6);
-  const entradas = meses.map(ym => ({label: ymParaLabel(ym), value: lancamentos.filter(l=>l.tipo==='entrada'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+(Number(l.valor)||0),0)}));
-  const saidas = meses.map(ym => ({label: ymParaLabel(ym), value: lancamentos.filter(l=>l.tipo==='saida'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+(Number(l.valor)||0),0), alt:true}));
+  const entradas = meses.map(ym => ({label: ymParaLabel(ym), value: lancamentos.filter(l=>l.tipo==='entrada'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+valorEfetivo(l),0)}));
+  const saidas = meses.map(ym => ({label: ymParaLabel(ym), value: lancamentos.filter(l=>l.tipo==='saida'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+valorEfetivo(l),0), alt:true}));
   const el = document.getElementById('rel-financeiro');
   el.innerHTML = '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-soft);font-weight:700;margin-bottom:4px;">Entradas</div><div id="rel-fin-entradas"></div><div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-soft);font-weight:700;margin:10px 0 4px;">Saídas</div><div id="rel-fin-saidas"></div>';
   barChart(document.getElementById('rel-fin-entradas'), entradas);
@@ -2383,8 +2565,8 @@ function gerarRelatorioPDF(){
 
   const meses6 = ultimosNMeses(6);
   const finLinhas = meses6.map(ym => {
-    const ent = lancamentos.filter(l=>l.tipo==='entrada'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+(Number(l.valor)||0),0);
-    const sai = lancamentos.filter(l=>l.tipo==='saida'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+(Number(l.valor)||0),0);
+    const ent = lancamentos.filter(l=>l.tipo==='entrada'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+valorEfetivo(l),0);
+    const sai = lancamentos.filter(l=>l.tipo==='saida'&&l.status==='pago'&&(l.data||'').slice(0,7)===ym).reduce((s,l)=>s+valorEfetivo(l),0);
     return `<tr><td>${ymParaLabel(ym)}</td><td class="num">${fmtMoney(ent)}</td><td class="num">${fmtMoney(sai)}</td><td class="num">${fmtMoney(ent-sai)}</td></tr>`;
   }).join('');
 
@@ -2585,7 +2767,12 @@ function openCreditoModal(clienteKeyAlvo){
     <div class="modal" style="max-width:400px;">
       <button type="button" class="modal-close" onclick="this.closest('.overlay').remove()">✕</button>
       <h2>${c ? 'Ajustar crédito' : 'Novo ajuste de crédito'}</h2>
-      <div class="field"><label>Cliente</label><input id="cr-cliente" type="text" value="${c?escapeHtml(c.cliente):''}" ${c?'readonly':''}></div>
+      <div class="field"><label>Cliente</label>
+        <div style="display:flex;gap:8px;">
+          <input id="cr-cliente" type="text" value="${c?escapeHtml(c.cliente):''}" style="flex:1;" ${c?'readonly':''}>
+          ${!c ? `<button type="button" class="btn secondary small" id="btnBuscarClienteCredito" style="white-space:nowrap;">Buscar cliente</button>` : ''}
+        </div>
+      </div>
       <div class="field"><label>Telefone (opcional)</label><input id="cr-telefone" type="text" value="${c?escapeHtml(c.telefone||''):''}"></div>
       ${c ? `<div class="field"><label>Saldo atual</label><div style="padding:8px 10px;border:1px solid var(--line);border-radius:4px;font-family:'IBM Plex Mono',monospace;font-weight:600;">${fmtMoney(c.saldo)}</div></div>` : ''}
       <div class="field"><label>Valor do ajuste (R$) — positivo adiciona crédito, negativo desconta</label><input id="cr-valor" type="number" step="0.01"></div>
@@ -2600,6 +2787,11 @@ function openCreditoModal(clienteKeyAlvo){
       </div>
     </div>`;
   document.body.appendChild(overlay);
+  if(!c){
+    overlay.querySelector('#btnBuscarClienteCredito').addEventListener('click', () => {
+      abrirBuscaClientePedido(overlay, 'cr-cliente', 'cr-telefone');
+    });
+  }
   overlay.querySelector('#cr-cancelar').addEventListener('click', () => overlay.remove());
   overlay.querySelector('#cr-salvar').addEventListener('click', () => {
     const cliente = overlay.querySelector('#cr-cliente').value.trim();
@@ -2818,7 +3010,7 @@ function openModal(id){
         <div class="field"><label>Valor da entrada</label><input id="f-entradaValor" type="number" step="0.01" min="0" value="${p&&p.entradaValor?p.entradaValor:''}" ${entradaTravada?'disabled':''}></div>
         <div class="field"><label>Conta de recebimento</label><select id="f-entradaConta" ${entradaTravada?'disabled':''}>${entradaContaOpts}</select></div>
       </div>
-      <div class="lmeta" style="margin:-8px 0 12px;">${entradaTravada ? '🔒 Entrada travada — já foi salva com valor. Só o Master pode alterar.' : 'Valor recebido no ato do pedido, separado dos pagamentos parcelados abaixo. Depois de salvo com valor, só o Master pode alterar.'}</div>
+      <div class="lmeta" style="margin:-8px 0 12px;">${entradaTravada ? '🔒 Após registrado, não é possível alterar o valor da entrada.' : 'Valor recebido no ato do pedido, separado dos pagamentos parcelados abaixo. Depois de salvo com valor, só o Master pode alterar.'}</div>
 
       <h4>Pagamentos recebidos <span id="pg-total" style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink-soft);"></span></h4>
       <div id="creditoDisponivel" style="display:none;"></div>
@@ -2853,12 +3045,27 @@ function openModal(id){
           </div>`;
         }
         const contaOptions = `<option value="">— sem conta vinculada —</option>` + contas.map(c=>`<option value="${c.id}" ${pg.contaId===c.id?'selected':''}>${escapeHtml(c.nome)}</option>`).join('');
+        const forma = pg.formaPagamento || 'dinheiro';
+        const ehCartao = forma==='debito' || forma==='credito';
+        const ehBoleto = forma==='boleto';
         return `<div class="item-card" data-idx="${i}">
           <div class="fieldrow three">
-            <input type="date" class="pg-data" value="${pg.data||todayISO()}">
-            <input type="number" class="pg-valor" step="0.01" min="0" placeholder="Valor" value="${pg.valor||''}">
+            <input type="date" class="pg-data" value="${pg.data||todayISO()}" title="Data">
+            <select class="pg-forma" title="Forma de pagamento">
+              <option value="dinheiro" ${forma==='dinheiro'?'selected':''}>Dinheiro</option>
+              <option value="pix" ${forma==='pix'?'selected':''}>Pix</option>
+              <option value="debito" ${forma==='debito'?'selected':''}>Cartão de Débito</option>
+              <option value="credito" ${forma==='credito'?'selected':''}>Cartão de Crédito</option>
+              <option value="boleto" ${forma==='boleto'?'selected':''}>Boleto</option>
+            </select>
             <select class="pg-conta">${contaOptions}</select>
           </div>
+          <div class="fieldrow" style="margin-top:6px;">
+            <input type="number" class="pg-valor" step="0.01" min="0" placeholder="${ehCartao?'Valor da venda':'Valor'}" value="${pg.valor||''}">
+            ${ehCartao ? `<input type="number" class="pg-valorRecebido" step="0.01" min="0" placeholder="Valor recebido (opcional)" value="${pg.valorRecebido!=null?pg.valorRecebido:''}">` : ''}
+            ${ehBoleto ? `<input type="date" class="pg-vencimento" value="${pg.vencimento||''}" title="Data de vencimento (obrigatória)">` : ''}
+          </div>
+          ${ehBoleto ? `<div class="lmeta" style="margin-top:2px;">Boleto exige data de vencimento.</div>` : ''}
           <div style="text-align:right;margin-top:4px;"><button class="removeItem" type="button" title="Remover pagamento">✕</button></div>
         </div>`;
       }).join('');
@@ -2874,6 +3081,12 @@ function openModal(id){
       if(pgValorInput) pgValorInput.addEventListener('input', e => { pagamentosDraft[i].valor = parseFloat(e.target.value)||0; atualizarResumoValores(); });
       const pgContaSel = card.querySelector('.pg-conta');
       if(pgContaSel) pgContaSel.addEventListener('change', e => pagamentosDraft[i].contaId = e.target.value || null);
+      const pgFormaSel = card.querySelector('.pg-forma');
+      if(pgFormaSel) pgFormaSel.addEventListener('change', e => { pagamentosDraft[i].formaPagamento = e.target.value; renderPagamentos(); });
+      const pgValorRecebidoInput = card.querySelector('.pg-valorRecebido');
+      if(pgValorRecebidoInput) pgValorRecebidoInput.addEventListener('input', e => { pagamentosDraft[i].valorRecebido = e.target.value===''?null:(parseFloat(e.target.value)||0); });
+      const pgVencimentoInput = card.querySelector('.pg-vencimento');
+      if(pgVencimentoInput) pgVencimentoInput.addEventListener('change', e => { pagamentosDraft[i].vencimento = e.target.value; });
       card.querySelector('.removeItem').addEventListener('click', () => {
         pagamentosDraft.splice(i,1); renderPagamentos();
       });
@@ -2883,7 +3096,7 @@ function openModal(id){
   }
   renderPagamentos();
   overlay.querySelector('#btnAddPagamento').addEventListener('click', () => {
-    pagamentosDraft.push({id:uid(), data:todayISO(), valor:0, contaId: contas.length===1?contas[0].id:null, lancamentoId:null, credito:false});
+    pagamentosDraft.push({id:uid(), data:todayISO(), valor:0, contaId: contas.length===1?contas[0].id:null, lancamentoId:null, credito:false, formaPagamento:'dinheiro', valorRecebido:null, vencimento:''});
     renderPagamentos();
   });
 
@@ -3036,6 +3249,12 @@ function openModal(id){
     const pagamentosValidos = pagamentosDraft.filter(pg => Number(pg.valor) > 0);
     const errBox = overlay.querySelector('#f-error');
     if(!cliente || itensValidos.length===0){
+      errBox.textContent = 'Preencha o cliente e pelo menos um item com valor.';
+      errBox.style.display = 'block';
+      return;
+    }
+    if(pagamentosValidos.some(pg => !pg.credito && pg.formaPagamento==='boleto' && !pg.vencimento)){
+      errBox.textContent = 'Pagamento por boleto precisa de uma data de vencimento.';
       errBox.style.display = 'block';
       return;
     }
@@ -3113,7 +3332,7 @@ function sincronizarPagamentos(pedidoId, osRef, cliente, pagamentosAntigos, paga
     if(!antigo){
       if(pg.contaId){
         const lancId = 'lc_'+uid();
-        lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, status:'pago', data:pg.data||todayISO(), vencimento:'', pedidoId});
+        lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, formaPagamento:pg.formaPagamento||'dinheiro', valorRecebido:pg.valorRecebido==null?null:Number(pg.valorRecebido), status:statusInicialLancamento('pago', pg.formaPagamento||'dinheiro', currentUserEmail), criadoPor:currentUserEmail, data:pg.data||todayISO(), vencimento:pg.vencimento||'', pedidoId});
         pg.lancamentoId = lancId;
       }
     } else if(pg.lancamentoId){
@@ -3121,6 +3340,7 @@ function sincronizarPagamentos(pedidoId, osRef, cliente, pagamentosAntigos, paga
       if(l){
         if(pg.contaId){
           l.contaId = pg.contaId; l.valor = Number(pg.valor)||0; l.data = pg.data || l.data;
+          l.formaPagamento = pg.formaPagamento||'dinheiro'; l.valorRecebido = pg.valorRecebido==null?null:Number(pg.valorRecebido); l.vencimento = pg.vencimento||'';
         } else {
           lancamentos = lancamentos.filter(x=>x.id!==pg.lancamentoId);
           pg.lancamentoId = null;
@@ -3128,7 +3348,7 @@ function sincronizarPagamentos(pedidoId, osRef, cliente, pagamentosAntigos, paga
       }
     } else if(pg.contaId && (pg.valor !== antigo.valor || pg.data !== antigo.data || pg.contaId !== antigo.contaId)){
       const lancId = 'lc_'+uid();
-      lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, status:'pago', data:pg.data||todayISO(), vencimento:'', pedidoId});
+      lancamentos.push({id:lancId, tipo:'entrada', contaId:pg.contaId, categoria:'Recebimento pedido', descricao:'Pedido '+osRef+' — '+cliente, valor:Number(pg.valor)||0, formaPagamento:pg.formaPagamento||'dinheiro', valorRecebido:pg.valorRecebido==null?null:Number(pg.valorRecebido), status:'pago', data:pg.data||todayISO(), vencimento:pg.vencimento||'', pedidoId});
       pg.lancamentoId = lancId;
     }
   });
